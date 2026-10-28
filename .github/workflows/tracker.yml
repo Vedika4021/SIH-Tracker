@@ -2,14 +2,14 @@ name: SIH Submission Tracker Automation
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Runs automatically every 6 hours
-  workflow_dispatch:        # Allows you to trigger it manually from the GitHub Actions tab
+    - cron: '0 * * * *'  # 👈 Runs automatically every 1 hour
+  workflow_dispatch:        # Allows manual triggers anytime
 
 jobs:
   run-tracker:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # Grants permissions to push back to the repository
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -30,5 +30,5 @@ jobs:
       - name: Commit and push changes if data updated
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Automated update: SIH submission logs [skip ci]"
+          commit_message: "Hourly automated update: SIH26264 submission log [skip ci]"
           file_pattern: 'data/sih_history.csv'
