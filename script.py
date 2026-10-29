@@ -1,85 +1,205 @@
-import os
+"""
+SIH 2026 Submission Tracker — script.py
+Tracks SIH26264 submission count hourly via Playwright (headless Chromium).
+
+Why Playwright?
+  sih.gov.in/sih2026PS is fully JavaScript-rendered. Plain requests +
+  BeautifulSoup only sees the static HTML shell — no PS IDs, no counts.
+  Playwright waits for the dynamic table to load before we read the data.
+
+Output: data/sih_history.csv — one clean row appended per run.
+Columns: Timestamp, PS_ID, Title, Submissions
+"""
+
 import csv
-from datetime import datetime
-import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+import os
+import re
+import sys
+from datetime import datetime, timezone
 
-URL = "https://www.sih.gov.in/sih2026PS"
-TARGET_PS_ID = "26264"
+# ── Config ──────────────────────────────────────────────────────────────────
+TARGET_PS_ID  = "SIH26264"   # full ID with prefix as shown on the live page
+TARGET_PS_NUM = "26264"      # numeric part used for HTML text search
+URL           = "https://sih.gov.in/sih2026PS"
+CSV_PATH      = "data/sih_history.csv"
+CSV_COLUMNS   = ["Timestamp", "PS_ID", "Title", "Submissions"]
+PAGE_TIMEOUT  = 60_000       # ms — 60 s for slow govt servers
+LOAD_WAIT     = 8_000        # ms — extra wait after networkidle
 
-def scrape_sih_data():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
+# Confirmed title — used as fallback if scraper can't extract it from the page
+KNOWN_TITLE = (
+    "Integrated Dashboard for Monitoring and Tracking "
+    "Institution-Related Complaint Cases Across AICTE Bureaus/Cells"
+)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+
+def scrape_with_playwright() -> dict | None:
+    """
+    Opens the SIH PS page with headless Chromium, waits for JS to render,
+    then locates the row/card for TARGET_PS_NUM and returns:
+        { "title": str, "submissions": str }
+    Returns None if the PS is not found.
+    """
     try:
-        response = requests.get(URL, headers=headers, timeout=15)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"Error fetching the portal: {e}")
-        return []
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    except ImportError:
+        print("ERROR: playwright not installed.")
+        print("  Run: pip install playwright && playwright install chromium")
+        sys.exit(1)
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    scraped_data = []
-    rows = soup.find_all('tr')
-    
-    for row in rows:
-        row_text = row.text
-        if TARGET_PS_ID in row_text:
-            cols = row.find_all('td')
-            if len(cols) >= 3:
-                try:
-                    title = "N/A"
-                    ideas_text = "0/500"
-                    
-                    for col in cols:
-                        # Clean up text to prevent breaking CSV formatting
-                        text = col.text.strip().replace('\n', ' ').replace('"', "'")
-                        if "/" in text and ("500" in text or text.replace("/", "").isdigit()):
-                            ideas_text = text
-                        elif len(text) > 10:
-                            title = text
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            locale="en-IN",
+            viewport={"width": 1280, "height": 900},
+        )
+        page = ctx.new_page()
 
-                    scraped_data.append({
-                        "Timestamp": timestamp,
-                        "PS_ID": f"SIH{TARGET_PS_ID}",
-                        "Title": title,
-                        "Submissions": ideas_text
-                    })
-                    print(f"Successfully matched target {TARGET_PS_ID}: {ideas_text}")
-                    break
-                except Exception:
-                    continue
-                
-    return scraped_data
-
-def update_history(new_data):
-    if not new_data:
-        print(f"Target Problem Statement {TARGET_PS_ID} not found in this run.")
-        return
-
-    os.makedirs("data", exist_ok=True)
-    csv_file = "data/sih_history.csv"
-    
-    df_new = pd.DataFrame(new_data)
-    
-    if os.path.exists(csv_file):
+        print(f"-> Opening {URL} ...")
         try:
-            df_old = pd.read_csv(csv_file)
-            # Filter out any corrupted historical rows if needed, or keep clean ones
-            df_combined = pd.concat([df_old, df_new], ignore_index=True)
-        except Exception:
-            df_combined = df_new
+            page.goto(URL, wait_until="networkidle", timeout=PAGE_TIMEOUT)
+        except PWTimeout:
+            print("  (networkidle timeout - proceeding with whatever loaded)")
+
+        # Extra buffer to let lazy-loaded data tables fully render
+        page.wait_for_timeout(LOAD_WAIT)
+
+        html = page.content()
+        browser.close()
+
+    # ── Parse the rendered HTML ──────────────────────────────────────────────
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Strategy 1: standard HTML table rows
+    result = _find_in_table(soup)
+    if result:
+        return result
+
+    # Strategy 2: card / div layout
+    result = _find_in_cards(soup)
+    if result:
+        return result
+
+    print(f"  PS {TARGET_PS_ID} not found in rendered page.")
+    return None
+
+
+def _find_in_table(soup) -> dict | None:
+    """Look for TARGET_PS_NUM in any <tr> and extract Title + Submissions."""
+    for row in soup.find_all("tr"):
+        row_text = row.get_text(" ", strip=True)
+        if TARGET_PS_NUM not in row_text:
+            continue
+
+        cols = [td.get_text(" ", strip=True) for td in row.find_all("td")]
+        if len(cols) < 2:
+            continue
+
+        title       = "N/A"
+        submissions = "N/A"
+
+        for col in cols:
+            # Submission count: "42/500", "42 / 500", or bare "42"
+            if re.match(r"^\d+\s*/\s*\d+$", col) or re.match(r"^\d+$", col):
+                submissions = col.replace(" ", "")
+            elif len(col) > 15 and TARGET_PS_NUM not in col:
+                title = col
+
+        if title != "N/A" or submissions != "N/A":
+            print(f"  [table] PS {TARGET_PS_ID} -> title='{title[:60]}', subs='{submissions}'")
+            return {"title": title, "submissions": submissions}
+
+    return None
+
+
+def _find_in_cards(soup) -> dict | None:
+    """
+    Fallback: find any text node containing TARGET_PS_NUM, walk up to a
+    card container, and extract title + submission count from it.
+    """
+    candidates = soup.find_all(string=re.compile(r"\b" + TARGET_PS_NUM + r"\b"))
+    for tag_str in candidates:
+        parent = tag_str.parent
+        if parent is None:
+            continue
+
+        container = parent
+        for _ in range(6):
+            if container is None:
+                break
+            container = container.parent
+            container_text = container.get_text(" ", strip=True)
+
+            count_match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", container_text)
+            submissions = count_match.group(0).replace(" ", "") if count_match else "N/A"
+
+            title = "N/A"
+            for child in container.find_all(["h5", "h6", "p", "span", "td", "div"]):
+                child_text = child.get_text(" ", strip=True)
+                if (
+                    len(child_text) > 20
+                    and TARGET_PS_NUM not in child_text
+                    and not re.match(r"^[\d\s/]+$", child_text)
+                ):
+                    title = child_text[:200]
+                    break
+
+            if submissions != "N/A" or title != "N/A":
+                print(f"  [card]  PS {TARGET_PS_ID} -> title='{title[:60]}', subs='{submissions}'")
+                return {"title": title, "submissions": submissions}
+
+    return None
+
+
+def append_to_csv(ps_data: dict | None) -> None:
+    """
+    Append exactly ONE clean row to the CSV.
+    Creates the file with a header row if it does not yet exist.
+    Uses csv.QUOTE_ALL so titles containing commas never break the layout.
+    """
+    os.makedirs("data", exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    if ps_data is None:
+        title, submissions = KNOWN_TITLE, "N/A"
+        print(f"  PS not found by scraper — writing row with known title")
     else:
-        df_combined = df_new
-        
-    # Use quoting=csv.QUOTE_ALL so titles with commas never break the file layout
-    df_combined.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
-    print(f"Successfully recorded clean update for SIH{TARGET_PS_ID}")
+        title       = " ".join(ps_data["title"].split())      # collapse whitespace
+        submissions = ps_data["submissions"]
+        # If scraper couldn't extract title, use the confirmed one
+        if title in ("N/A", "", "NOT_FOUND"):
+            title = KNOWN_TITLE
+
+    row = {
+        "Timestamp":   timestamp,
+        "PS_ID":       TARGET_PS_ID,
+        "Title":       title,
+        "Submissions": submissions,
+    }
+
+    file_is_new = not os.path.isfile(CSV_PATH) or os.path.getsize(CSV_PATH) == 0
+
+    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, quoting=csv.QUOTE_ALL)
+        if file_is_new:
+            writer.writeheader()
+        writer.writerow(row)
+
+    print(f"Appended row -> {CSV_PATH}")
+    print(f"  {row}")
+
 
 if __name__ == "__main__":
-    data = scrape_sih_data()
-    update_history(data)
+    print(f"=== SIH Tracker | {datetime.now(timezone.utc).isoformat()} ===")
+    data = scrape_with_playwright()
+    append_to_csv(data)
+    print("=== Done ===")

@@ -2,8 +2,8 @@ name: SIH Submission Tracker Automation
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 👈 Runs automatically every 1 hour
-  workflow_dispatch:        # Allows manual triggers anytime
+    - cron: '0 * * * *'  # Runs automatically every 1 hour
+  workflow_dispatch:       # Allows manual trigger anytime
 
 jobs:
   run-tracker:
@@ -14,21 +14,28 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          pip install requests beautifulsoup4 pandas
+          pip install playwright beautifulsoup4
 
-      - name: Run Python Scraper
+      - name: Install Playwright Chromium browser
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run SIH Tracker Script
         run: python script.py
 
-      - name: Commit and push changes if data updated
+      - name: Commit and push updated CSV
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Hourly automated update: SIH26264 submission log [skip ci]"
-          file_pattern: 'data/sih_history.csv'
+          commit_message: "chore: hourly data update SIH26264 [skip ci]"
+          file_pattern: 'data/sih_history.csv'
