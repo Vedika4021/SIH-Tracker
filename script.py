@@ -4,11 +4,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-# Target URL for SIH Problem Statements
 URL = "https://www.sih.gov.in/sih2026PS"
-
-# Your specific Problem Statement ID
-TARGET_PS_ID = "SIH26264"
+TARGET_PS_ID = "26264" # Or "SIH26264"
 
 def scrape_sih_data():
     headers = {
@@ -29,25 +26,33 @@ def scrape_sih_data():
     rows = soup.find_all('tr')
     
     for row in rows:
-        cols = row.find_all('td')
-        if len(cols) >= 4:
-            try:
-                ps_id = cols[3].text.strip() if len(cols) > 3 else "N/A"
-                
-                # Filter specifically for your target ID
-                if ps_id == TARGET_PS_ID:
-                    title = cols[2].text.strip() if len(cols) > 2 else "N/A"
-                    ideas_text = cols[4].text.strip() if len(cols) > 4 else "0/500"
+        row_text = row.text
+        # Look specifically for your problem statement number
+        if TARGET_PS_ID in row_text:
+            cols = row.find_all('td')
+            if len(cols) >= 3:
+                try:
+                    # Extract text from all columns to find the one with the submission count (e.g., contains "/")
+                    title = "N/A"
+                    ideas_text = "0/500"
                     
+                    for col in cols:
+                        text = col.text.strip()
+                        if "/" in text and ("500" in text or "Ideas" in text or text.replace("/", "").isdigit()):
+                            ideas_text = text
+                        elif len(text) > 15: # Likely the title description
+                            title = text
+
                     scraped_data.append({
                         "Timestamp": timestamp,
-                        "PS_ID": ps_id,
+                        "PS_ID": f"SIH{TARGET_PS_ID}",
                         "Title": title,
                         "Submissions": ideas_text
                     })
-                    break 
-            except Exception as inner_err:
-                continue
+                    print(f"Found target {TARGET_PS_ID} with submissions: {ideas_text}")
+                    break
+                except Exception as inner_err:
+                    continue
                 
     return scraped_data
 
@@ -68,7 +73,7 @@ def update_history(new_data):
         df_combined = df_new
         
     df_combined.to_csv(csv_file, index=False)
-    print(f"Successfully recorded update for {TARGET_PS_ID} at {datetime.now()}")
+    print(f"Successfully recorded update for SIH{TARGET_PS_ID} at {datetime.now()}")
 
 if __name__ == "__main__":
     data = scrape_sih_data()
